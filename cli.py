@@ -22,6 +22,7 @@ from src.schemas import BatchItemProgress, BatchTranscriptionResponse
 
 
 console = Console()
+stderr_console = Console(stderr=True)
 
 
 def render_progress_table(tasks: List[BatchItemProgress], overall_title: str = "多视频并发处理看板") -> Table:
@@ -63,7 +64,7 @@ def run_single(args, url: str):
     )
 
     if res.status == "error":
-        console.print(f"[bold red][错误][/bold red] {res.error_message}", file=sys.stderr)
+        stderr_console.print(f"[bold red][错误][/bold red] {res.error_message}")
         sys.exit(1)
 
     if args.json:

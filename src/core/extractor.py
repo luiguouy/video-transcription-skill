@@ -6,6 +6,7 @@
 import os
 import re
 import time
+import urllib.request
 import subprocess
 from typing import Dict, Any, Tuple, Optional
 import yt_dlp
@@ -120,6 +121,47 @@ class MediaExtractor:
             return options
 
     @classmethod
+    def _extract_via_tikwm(cls, url: str, output_dir: str, temp_id: str, proxy: Optional[str] = None) -> Tuple[str, Dict[str, Any]]:
+        """
+        TikTok 官方高风控/敏感限制视频备选通道 (TikWM API)
+        免登录解析并下载无水印/超清 MP4 原画
+        """
+        import httpx
+        client_kwargs = {"timeout": 30, "verify": False}
+        if proxy:
+            client_kwargs["proxy"] = proxy
+
+        with httpx.Client(**client_kwargs) as client:
+            resp = client.post("https://www.tikwm.com/api/", data={"url": url, "hd": 1})
+            data = resp.json()
+            if data.get("code") != 0 or not data.get("data"):
+                raise ValueError(f"TikWM 解析失败: {data.get('msg', '未知错误')}")
+
+            item = data["data"]
+            video_url = item.get("hdplay") or item.get("play") or item.get("wmplay")
+            if not video_url:
+                raise ValueError("TikWM 未提供有效视频下载直链")
+
+            raw_title = item.get("title") or item.get("content_desc") or f"tiktok_{item.get('id', temp_id)}"
+            target_temp_mp4 = os.path.join(output_dir, f"temp_{temp_id}.mp4")
+
+            with client.stream("GET", video_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}) as r:
+                r.raise_for_status()
+                with open(target_temp_mp4, "wb") as f:
+                    for chunk in r.iter_bytes(chunk_size=65536):
+                        f.write(chunk)
+
+            meta = {
+                "id": str(item.get("id", "")),
+                "title": raw_title,
+                "duration": item.get("duration", 0),
+                "uploader": (item.get("author") or {}).get("nickname") or (item.get("author") or {}).get("unique_id"),
+                "uploader_id": (item.get("author") or {}).get("unique_id"),
+                "music_info": item.get("music_info", {}),
+            }
+            return target_temp_mp4, meta
+
+    @classmethod
     def extract_media(cls, url: str, output_dir: str) -> Tuple[str, Optional[str], Dict[str, Any]]:
         """
         通过 yt-dlp 抓取完整 MP4 视频，并借助本地 FFmpeg 转码为 16kHz 单声道 WAV 格式。
@@ -144,27 +186,55 @@ class MediaExtractor:
             "js_runtimes": {"node": {}},
         }
 
-        # 智能代理分流：国内平台（抖音、B站）强制直连，国外平台优先使用 settings 或系统环境变量代理
+        # 智能代理分流：国内平台（抖音、B站）强制直连，国外平台优先使用 settings 或系统环境变量/系统网络代理
         is_domestic = any(d in url for d in ["douyin.com", "bilibili.com", "b23.tv", "iesdouyin.com"])
+        sys_proxies = urllib.request.getproxies()
+        discovered_proxy = (
+            settings.HTTP_PROXY
+            or os.environ.get("HTTP_PROXY")
+            or os.environ.get("http_proxy")
+            or sys_proxies.get("http")
+            or sys_proxies.get("https")
+        )
+
         if is_domestic:
             ydl_opts["proxy"] = ""
-        elif settings.HTTP_PROXY:
-            ydl_opts["proxy"] = settings.HTTP_PROXY
-        elif os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy"):
-            ydl_opts["proxy"] = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+            proxy_url = None
+        else:
+            if discovered_proxy:
+                ydl_opts["proxy"] = discovered_proxy
+            proxy_url = discovered_proxy
 
         # 智能多浏览器探测与 Cookies 兼容策略 (Edge / Chrome / Firefox 自动适配与平滑降级)
         cookie_opts = cls._resolve_cookie_options()
         ydl_opts.update(cookie_opts)
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            meta = ydl.extract_info(url, download=True)
+        meta = None
+        downloaded_file = None
 
-            raw_title = meta.get("title", f"media_{temp_id}")
-            safe_title = re.sub(r'[\\/*?:"<>|\r\n\t]', '_', raw_title).strip()[:50]
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                meta = ydl.extract_info(url, download=True)
+        except Exception as e:
+            # 针对 TikTok 的高风控/需要登录受限视频，自动回退到 TikWM 解析服务
+            if "tiktok.com" in url or "vt.tiktok" in url:
+                try:
+                    downloaded_file, meta = cls._extract_via_tikwm(
+                        url=url,
+                        output_dir=output_dir,
+                        temp_id=temp_id,
+                        proxy=proxy_url
+                    )
+                except Exception as fallback_err:
+                    raise RuntimeError(f"yt-dlp 提取失败: {e}，且 TikWM 备选通道解析失败: {fallback_err}") from fallback_err
+            else:
+                raise
 
-            # 寻找下载生成的原始视频文件
-            downloaded_file = None
+        raw_title = (meta or {}).get("title", f"media_{temp_id}")
+        safe_title = re.sub(r'[\\/*?:"<>|\r\n\t]', '_', raw_title).strip()[:50]
+
+        # 寻找下载生成的原始视频文件
+        if not downloaded_file:
             for ext in ["mp4", "mkv", "webm", "flv"]:
                 candidate = os.path.join(output_dir, f"temp_{temp_id}.{ext}")
                 if os.path.exists(candidate):
@@ -177,28 +247,28 @@ class MediaExtractor:
                         downloaded_file = os.path.join(output_dir, f)
                         break
 
-            target_mp4 = os.path.join(output_dir, f"{safe_title}_{temp_id}.mp4")
-            target_wav = os.path.join(output_dir, f"{safe_title}_{temp_id}.wav")
+        target_mp4 = os.path.join(output_dir, f"{safe_title}_{temp_id}.mp4")
+        target_wav = os.path.join(output_dir, f"{safe_title}_{temp_id}.wav")
 
-            # 重命名为规范命名的 MP4 视频
-            if downloaded_file and os.path.exists(downloaded_file):
-                os.rename(downloaded_file, target_mp4)
-            else:
-                target_mp4 = None
+        # 重命名为规范命名的 MP4 视频
+        if downloaded_file and os.path.exists(downloaded_file):
+            os.rename(downloaded_file, target_mp4)
+        else:
+            target_mp4 = None
 
-            # 从完整视频提取 16kHz WAV
-            input_source = target_mp4 if (target_mp4 and os.path.exists(target_mp4)) else downloaded_file
-            if input_source and os.path.exists(input_source):
-                cmd = [
-                    "ffmpeg", "-i", input_source,
-                    "-ar", "16000", "-ac", "1",
-                    "-vn", "-y", target_wav
-                ]
-                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            else:
-                raise FileNotFoundError("音频转换失败，未能找到视频目标文件。")
+        # 从完整视频提取 16kHz WAV
+        input_source = target_mp4 if (target_mp4 and os.path.exists(target_mp4)) else downloaded_file
+        if input_source and os.path.exists(input_source):
+            cmd = [
+                "ffmpeg", "-i", input_source,
+                "-ar", "16000", "-ac", "1",
+                "-vn", "-y", target_wav
+            ]
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            raise FileNotFoundError("音频转换失败，未能找到视频目标文件。")
 
-            return target_wav, target_mp4, meta
+        return target_wav, target_mp4, meta
 
     # 兼容原接口
     @classmethod

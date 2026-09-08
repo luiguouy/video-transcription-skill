@@ -22,8 +22,8 @@ class TextCleaner:
 
         url = match.group(1).strip()
 
-        # 针对短链（如 v.douyin.com / b23.tv 等）尝试解析重定向后的完整地址
-        if any(short_domain in url for short_domain in ["v.douyin.com", "b23.tv", "t.co"]):
+        # 针对短链（如 v.douyin.com / b23.tv / vt.tiktok.com 等）尝试解析重定向后的完整地址
+        if any(short_domain in url for short_domain in ["v.douyin.com", "b23.tv", "t.co", "vt.tiktok.com"]):
             try:
                 headers = {
                     "User-Agent": (
