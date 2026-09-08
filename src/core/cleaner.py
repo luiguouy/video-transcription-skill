@@ -3,6 +3,7 @@
 负责 URL 净化、中文字符空格消除、标点规整及多尺度时间戳格式化
 """
 
+import os
 import re
 import urllib.request
 from typing import List, Any
@@ -12,13 +13,18 @@ class TextCleaner:
     @staticmethod
     def extract_url(raw_input: str) -> str:
         """
-        从用户可能混杂分享文案的输入中提取有效 URL，并进行短链解析处理。
+        从用户可能混杂分享文案的输入中提取有效 URL，并进行短链解析处理；
+        若输入为本地存在的音视频文件路径，则直接清洗并返回规范路径。
         示例: "7.28 03/12 S@s.xy cLg:/ 惊呆了！ https://v.douyin.com/ieABC/ 复制此链接..."
         """
+        cleaned_input = raw_input.strip().strip('"').strip("'")
+        if os.path.isfile(cleaned_input):
+            return cleaned_input
+
         url_pattern = r"(https?://[^\s，。]+)"
         match = re.search(url_pattern, raw_input)
         if not match:
-            return raw_input.strip()
+            return cleaned_input
 
         url = match.group(1).strip()
 

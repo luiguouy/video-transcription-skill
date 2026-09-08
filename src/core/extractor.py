@@ -174,6 +174,47 @@ class MediaExtractor:
         temp_id = f"{int(time.time())}_{uuid.uuid4().hex[:6]}"
         out_template = os.path.join(output_dir, f"temp_{temp_id}.%(ext)s")
 
+        # 兼容用户直接传入本地音视频文件路径
+        import shutil
+        clean_path = url.strip().strip('"').strip("'")
+        if os.path.isfile(clean_path):
+            safe_title = os.path.splitext(os.path.basename(clean_path))[0]
+            safe_title = re.sub(r'[\\/*?:"<>|\r\n\t]', '_', safe_title).strip()[:50]
+            target_mp4 = os.path.join(output_dir, f"{safe_title}_{temp_id}.mp4")
+            target_wav = os.path.join(output_dir, f"{safe_title}_{temp_id}.wav")
+
+            # 拷贝一份到统一下载持久化目录
+            shutil.copy2(clean_path, target_mp4)
+
+            # 提取 16kHz 单声道 WAV
+            cmd = [
+                "ffmpeg", "-i", target_mp4,
+                "-ar", "16000", "-ac", "1",
+                "-vn", "-y", target_wav
+            ]
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            # 探测视频时长
+            duration = 0.0
+            try:
+                probe_cmd = [
+                    "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1", target_mp4
+                ]
+                res = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                if res.stdout.strip():
+                    duration = float(res.stdout.strip())
+            except Exception:
+                pass
+
+            meta = {
+                "id": temp_id,
+                "title": safe_title,
+                "duration": duration,
+                "uploader": "local_file"
+            }
+            return target_wav, target_mp4, meta
+
         ydl_opts = {
             "format": "bestvideo+bestaudio/best",
             "outtmpl": out_template,
